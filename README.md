@@ -1,6 +1,31 @@
 # kurarun
 
+[![Tag](https://img.shields.io/github/tag/jfut/kurarun.svg)](https://github.com/jfut/kurarun/releases)
+[![License](https://img.shields.io/badge/license-Apache%202-blue)](https://github.com/jfut/kurarun/blob/main/LICENSE)
+
 `kurarun` is a Linux CLI tool that runs a command and can record its output and exit status to a log file. It is intended for use with cron, systemd timers, CI/CD, and scheduled batch jobs.
+
+## Installation
+
+Download an RPM package from the [Releases](https://github.com/jfut/kurarun/releases) page, or configure the RPM repository below on RHEL-compatible distributions.
+
+### Install with dnf-plugin-anyrepo
+
+First, install [dnf-plugin-anyrepo](https://github.com/jfut/dnf-plugin-anyrepo) by following its installation instructions.
+
+Next, import the RPM public signing key, add the repository, and install the package with `dnf`.
+
+```bash
+rpm --import https://raw.githubusercontent.com/jfut/kurarun/refs/heads/main/RPM-GPG-KEY-jfut-github
+dnf-anyrepo add https://github.com/jfut/kurarun
+dnf install kurarun
+```
+
+To upgrade the package later, run:
+
+```bash
+dnf upgrade kurarun
+```
 
 ## Usage
 
