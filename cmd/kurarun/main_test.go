@@ -15,15 +15,15 @@ import (
 	"time"
 )
 
-func TestRunLogsOutputAndExitCode(t *testing.T) {
+func TestRunLogsAndPrintsFailureOutput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "job.log")
+	if err := os.WriteFile(path, []byte("previous execution\n"), 0660); err != nil {
+		t.Fatal(err)
+	}
 	var stdout, stderr bytes.Buffer
 	code := run(options{LogPath: path}, []string{"sh", "-c", "printf hello; printf error >&2; exit 7"}, &stdout, &stderr)
 	if code != 7 {
 		t.Fatalf("exit code = %d, want 7", code)
-	}
-	if stdout.Len() != 0 || stderr.Len() != 0 {
-		t.Fatalf("terminal output = stdout %q, stderr %q, want none", stdout.String(), stderr.String())
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -33,6 +33,55 @@ func TestRunLogsOutputAndExitCode(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("log does not contain %q: %s", want, data)
 		}
+	}
+	if strings.Contains(stdout.String(), "previous execution") {
+		t.Fatalf("failure stdout includes an earlier execution: %q", stdout.String())
+	}
+	if got := string(data); got != "previous execution\n"+stdout.String() {
+		t.Fatalf("log = %q, want earlier and current execution records", got)
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("failure stderr = %q, want empty", got)
+	}
+}
+
+func TestRunDoesNotPrintSuccessfulLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.log")
+	var stdout, stderr bytes.Buffer
+	code := run(options{LogPath: path}, []string{"sh", "-c", "printf hello; printf error >&2"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("success stdout = %q, want empty", got)
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("success stderr = %q, want empty", got)
+	}
+}
+
+func TestRunTruncatePrintsFailureOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.log")
+	if err := os.WriteFile(path, []byte("previous execution\n"), 0660); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run(options{LogPath: path, Truncate: true}, []string{"sh", "-c", "printf failure; exit 7"}, &stdout, &stderr)
+	if code != 7 {
+		t.Fatalf("exit code = %d, want 7", code)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "previous execution") {
+		t.Fatalf("truncated log includes an earlier execution: %q", data)
+	}
+	if got := stdout.String(); got != string(data) {
+		t.Fatalf("failure stdout = %q, want current execution log %q", got, data)
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("failure stderr = %q, want empty", got)
 	}
 }
 

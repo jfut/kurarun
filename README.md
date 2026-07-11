@@ -96,7 +96,7 @@ Everything after `--` is the command to execute and its arguments. A shell is no
 
 Each line begins with an RFC 3339 timestamp with millisecond precision and a time zone. The start line, the child process's standard output and standard error, and the exit line are written to the same file in real time. The arrival order of standard output and standard error is preserved as much as possible.
 
-Without `--log`, timestamped child process output is displayed in the terminal and no log file is written. With `--log`, output is written only to the log file unless `--tee` is specified. `--truncate` requires `--log`.
+Without `--log`, timestamped child process output is displayed in the terminal and no log file is written. With `--log`, output is written only to the log file unless `--tee` is specified. If the command exits with a non-zero status, kurarun writes this execution's complete log records to standard output after the command finishes, so cron can send them by email. `--truncate` requires `--log`.
 
 ```text
 2026-07-11T00:42:06.639+09:00 command start: /usr/local/bin/backup.sh
