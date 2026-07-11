@@ -251,6 +251,10 @@ func TestTimestampUsesMillisecondPrecision(t *testing.T) {
 	got := timestamp()
 	dot := strings.LastIndex(got, ".")
 	zone := strings.LastIndexAny(got, "+-")
+	// UTC timestamps end in Z, which has no explicit '+' or '-' offset.
+	if strings.HasSuffix(got, "Z") {
+		zone = len(got) - 1
+	}
 	if dot < 0 || zone <= dot || len(got[dot+1:zone]) != 3 {
 		t.Fatalf("timestamp = %q, want three fractional digits", got)
 	}
