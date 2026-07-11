@@ -1,0 +1,353 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the kurarun project.
+
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+	"unicode/utf8"
+
+	"github.com/alecthomas/kong"
+)
+
+// Build metadata fields are injected by linker flags at build time.
+var (
+	version = "dev"
+	commit  = "none"
+)
+
+type options struct {
+	LogPath  string           `name:"log" short:"l" placeholder:"FILE" help:"Log file path. Use '-' to append .log to the command path."`
+	Format   string           `name:"output" short:"o" enum:"text,json" default:"text" help:"Output format (text or json)."`
+	Truncate bool             `short:"t" help:"Truncate the log before execution."`
+	Tee      bool             `help:"Also write log records to the terminal."`
+	Quiet    bool             `short:"q" help:"Do not write runner messages to the terminal."`
+	Version  kong.VersionFlag `help:"Print version information and quit."`
+	Command  []string         `arg:"" optional:"" passthrough:"" placeholder:"command" help:"Command and arguments to execute."`
+}
+
+func main() {
+	opts, command, code := parseArgs(os.Args[1:], os.Stdout, os.Stderr)
+	if code != 0 {
+		os.Exit(code)
+	}
+	if command == nil { // --help and --version complete without running a command.
+		return
+	}
+	os.Exit(run(opts, command, os.Stdout, os.Stderr))
+}
+
+func parseArgs(args []string, stdout, stderr io.Writer) (options, []string, int) {
+	var opts options
+	parser, err := kong.New(&opts,
+		kong.Name("kurarun"),
+		kong.Description("Execute one command and record its output in a text log."),
+		kong.Vars{"version": fmt.Sprintf("kurarun %s (%s)", version, commit)},
+		kong.Writers(stdout, stderr),
+		kong.Help(printHelp),
+	)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "kurarun: cannot configure argument parser: %v\n", err)
+		return opts, nil, 125
+	}
+
+	// Let parseArgs return help and version exit statuses instead of ending the process.
+	exitCode := -1
+	parser.Exit = func(code int) { exitCode = code }
+	if _, err := parser.Parse(args); err != nil {
+		if exitCode == 0 {
+			return opts, nil, 0
+		}
+		parser.Errorf("%s", err)
+		return opts, nil, 125
+	}
+	if exitCode == 0 {
+		return opts, nil, 0
+	}
+	command := opts.Command
+	if len(command) > 0 && command[0] == "--" {
+		// Kong preserves the delimiter for passthrough arguments; it is not a child argument.
+		command = command[1:]
+	}
+	if len(command) == 0 {
+		parser.Errorf("a command is required")
+		return opts, nil, 125
+	}
+	if opts.LogPath == "" && opts.Truncate {
+		parser.Errorf("--truncate requires --log")
+		return opts, nil, 125
+	}
+	return opts, command, 0
+}
+
+func printHelp(options kong.HelpOptions, ctx *kong.Context) error {
+	var help bytes.Buffer
+	original := ctx.Stdout
+	ctx.Stdout = &help
+	err := kong.DefaultHelpPrinter(options, ctx)
+	ctx.Stdout = original
+	text := strings.Replace(help.String(), "Usage: kurarun [<command> ...] [flags]", "Usage: kurarun [flags] -- <command> ...", 1)
+	_, _ = io.WriteString(original, text)
+	return err
+}
+
+func run(opts options, argv []string, stdout, stderr io.Writer) int {
+	log := io.Writer(io.Discard)
+	logPath := opts.LogPath
+	if logPath == "-" {
+		logPath = argv[0] + ".log"
+	}
+	if logPath != "" {
+		flags := os.O_WRONLY | os.O_CREATE | os.O_APPEND
+		if opts.Truncate {
+			flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		}
+		logFile, err := os.OpenFile(logPath, flags, 0660)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "kurarun: cannot open log file: %v\n", err)
+			return 125
+		}
+		defer func() { _ = logFile.Close() }()
+		log = logFile
+	}
+
+	writeTerminal := opts.LogPath == "" || opts.Tee
+	terminalStdout, terminalStderr := io.Writer(io.Discard), io.Writer(io.Discard)
+	if writeTerminal {
+		// Commands without a log retain their direct terminal output behavior.
+		terminalStdout, terminalStderr = stdout, stderr
+	}
+	output := newLineLogger(log, terminalStdout, terminalStderr, opts.Format)
+	start := time.Now()
+	output.info(fmt.Sprintf("command start: %s", formatCommand(argv)), !opts.Quiet && writeTerminal)
+
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	commandStdout := output.stdout()
+	commandStderr := output.stderr()
+	cmd.Stdout = commandStdout
+	cmd.Stderr = commandStderr
+
+	// Register before starting the command so an early termination signal is queued.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	if err := cmd.Start(); err != nil {
+		signal.Stop(signals)
+		code := startErrorCode(err)
+		output.info(fmt.Sprintf("command could not start: %v", err), !opts.Quiet && writeTerminal)
+		output.info(exitLine(code, time.Since(start), ""), !opts.Quiet && writeTerminal)
+		return code
+	}
+
+	done := make(chan struct{})
+	var signalWG sync.WaitGroup
+	signalWG.Add(1)
+	go func() {
+		defer signalWG.Done()
+		forwardSignals(signals, done, func(sig syscall.Signal) {
+			// Send every received signal to the child process group so shell-created children also stop.
+			_ = syscall.Kill(-cmd.Process.Pid, sig)
+		})
+	}()
+	err := cmd.Wait()
+	signal.Stop(signals)
+	close(done)
+	signalWG.Wait()
+	commandStdout.flush()
+	commandStderr.flush()
+
+	code, signalName := exitCode(err)
+	output.info(exitLine(code, time.Since(start), signalName), !opts.Quiet && writeTerminal)
+	return code
+}
+
+func forwardSignals(signals <-chan os.Signal, done <-chan struct{}, forward func(syscall.Signal)) {
+	for {
+		select {
+		case sig := <-signals:
+			select {
+			case <-done:
+				return
+			default:
+			}
+			forward(sig.(syscall.Signal))
+		case <-done:
+			return
+		}
+	}
+}
+
+func startErrorCode(err error) int {
+	if errors.Is(err, exec.ErrNotFound) {
+		return 127
+	}
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) && errors.Is(pathErr.Err, syscall.EACCES) {
+		return 126
+	}
+	return 127
+}
+
+func exitCode(err error) (int, string) {
+	if err == nil {
+		return 0, ""
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		status := exitErr.Sys().(syscall.WaitStatus)
+		if status.Signaled() {
+			return 128 + int(status.Signal()), signalLabel(status.Signal())
+		}
+		return status.ExitStatus(), ""
+	}
+	return 127, ""
+}
+
+func signalLabel(sig syscall.Signal) string {
+	switch sig {
+	case syscall.SIGINT:
+		return "SIGINT"
+	case syscall.SIGTERM:
+		return "SIGTERM"
+	case syscall.SIGHUP:
+		return "SIGHUP"
+	case syscall.SIGQUIT:
+		return "SIGQUIT"
+	default:
+		return sig.String()
+	}
+}
+
+func exitLine(code int, elapsed time.Duration, signalName string) string {
+	line := fmt.Sprintf("command exited with code: %d, duration: %s", code, formatDuration(elapsed))
+	if signalName != "" {
+		line += fmt.Sprintf(", signal: %s, status: terminated", signalName)
+	}
+	return line
+}
+
+func formatDuration(d time.Duration) string {
+	ms := d.Milliseconds()
+	day := ms / (24 * 60 * 60 * 1000)
+	ms %= 24 * 60 * 60 * 1000
+	hour := ms / (60 * 60 * 1000)
+	ms %= 60 * 60 * 1000
+	minute := ms / (60 * 1000)
+	ms %= 60 * 1000
+	second := ms / 1000
+	ms %= 1000
+	return fmt.Sprintf("0000-00-%02d %02d:%02d:%02d.%03d", day, hour, minute, second, ms)
+}
+
+func formatCommand(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, arg := range argv {
+		if arg == "" || strings.ContainsAny(arg, " \t\n'\"\\$&;|<>*?()[]{}!") {
+			quoted[i] = fmt.Sprintf("%q", arg)
+		} else {
+			quoted[i] = arg
+		}
+	}
+	return strings.Join(quoted, " ")
+}
+
+type lineLogger struct {
+	mu            sync.Mutex
+	log, out, err io.Writer
+	format        string
+}
+
+func newLineLogger(log, out, err io.Writer, format string) *lineLogger {
+	return &lineLogger{log: log, out: out, err: err, format: format}
+}
+
+func (l *lineLogger) stdout() *streamWriter {
+	return &streamWriter{logger: l, terminal: l.out, stream: "stdout"}
+}
+
+func (l *lineLogger) stderr() *streamWriter {
+	return &streamWriter{logger: l, terminal: l.err, stream: "stderr"}
+}
+
+func (l *lineLogger) info(message string, terminal bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var terminalWriter io.Writer
+	if terminal {
+		terminalWriter = l.out
+	}
+	l.writeRecord(timestamp(), message, "", terminalWriter)
+}
+
+func (l *lineLogger) writeRecord(ts, message, stream string, terminal io.Writer) {
+	line := ts + " " + message + "\n"
+	if l.format == "json" {
+		record := map[string]string{"timestamp": ts, "message": message}
+		if !utf8.ValidString(message) {
+			// JSON strings require UTF-8, so retain arbitrary command output losslessly.
+			record["message"] = base64.StdEncoding.EncodeToString([]byte(message))
+			record["encoding"] = "base64"
+		}
+		if stream != "" {
+			record["stream"] = stream
+		}
+		encoded, err := json.Marshal(record)
+		if err == nil {
+			line = string(encoded) + "\n"
+		}
+	}
+	_, _ = io.WriteString(l.log, line)
+	if terminal != nil {
+		_, _ = io.WriteString(terminal, line)
+	}
+}
+
+func timestamp() string {
+	// Millisecond precision is sufficient for command output ordering and keeps logs concise.
+	return time.Now().Format("2006-01-02T15:04:05.000Z07:00")
+}
+
+type streamWriter struct {
+	logger   *lineLogger
+	terminal io.Writer
+	stream   string
+	pending  []byte
+}
+
+func (w *streamWriter) Write(p []byte) (int, error) {
+	w.logger.mu.Lock()
+	defer w.logger.mu.Unlock()
+	// Pipe writes are not line-oriented, so retain incomplete lines until their newline arrives.
+	w.pending = append(w.pending, p...)
+	for {
+		end := bytes.IndexByte(w.pending, '\n')
+		if end < 0 {
+			break
+		}
+		w.logger.writeRecord(timestamp(), string(w.pending[:end]), w.stream, w.terminal)
+		w.pending = w.pending[end+1:]
+	}
+	return len(p), nil
+}
+
+func (w *streamWriter) flush() {
+	w.logger.mu.Lock()
+	defer w.logger.mu.Unlock()
+	if len(w.pending) == 0 {
+		return
+	}
+	w.logger.writeRecord(timestamp(), string(w.pending), w.stream, w.terminal)
+	w.pending = nil
+}

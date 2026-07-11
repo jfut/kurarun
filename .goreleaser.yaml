@@ -1,0 +1,86 @@
+version: 2
+
+project_name: kurarun
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
+
+report_sizes: true
+
+builds:
+  - id: kurarun
+    binary: kurarun
+    main: ./cmd/kurarun
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
+
+upx:
+  - enabled: true
+    lzma: true
+
+archives:
+  - id: binaries
+    ids:
+      - kurarun
+    formats: ["tar.gz"]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    builds_info:
+      group: root
+      owner: root
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+checksum:
+  name_template: "checksums.txt"
+
+nfpms:
+  - id: kurarun
+    package_name: kurarun
+    file_name_template: "{{ .ConventionalFileName }}"
+    ids:
+      - kurarun
+    description: |-
+      kurarun is a Linux CLI tool that runs a command and can record its output and exit status to a log file
+    maintainer: Jun Futagawa <jfut@integ.jp>
+    license: Apache-2.0
+    vendor: kurarun project
+    homepage: https://github.com/jfut/kurarun
+    bindir: /usr/bin
+    section: utils
+    formats:
+      - apk
+      - deb
+      - rpm
+      - termux.deb
+      - archlinux
+    rpm:
+      signature:
+        key_file: '{{ with index .Env "GPG_KEY_PATH" }}{{ . }}{{ end }}'
+    deb:
+      lintian_overrides:
+        - statically-linked-binary
+        - changelog-file-missing-in-native-package
