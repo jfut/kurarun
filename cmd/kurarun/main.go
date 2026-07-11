@@ -108,16 +108,15 @@ func printHelp(options kong.HelpOptions, ctx *kong.Context) error {
 func run(opts options, argv []string, stdout, stderr io.Writer) int {
 	log := io.Writer(io.Discard)
 	var logFile *os.File
-	var logStart int64
+	var failureLog *os.File
 	logPath := opts.LogPath
 	if logPath == "-" {
 		logPath = argv[0] + ".log"
 	}
 	if logPath != "" {
-		flags := os.O_RDWR | os.O_CREATE | os.O_APPEND
+		flags := os.O_WRONLY | os.O_CREATE | os.O_APPEND
 		if opts.Truncate {
-			// Failure handling reads this execution's records back to stdout.
-			flags = os.O_RDWR | os.O_CREATE | os.O_TRUNC
+			flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 		}
 		var err error
 		logFile, err = os.OpenFile(logPath, flags, 0660)
@@ -126,12 +125,18 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 			return 125
 		}
 		defer func() { _ = logFile.Close() }()
-		logStart, err = logFile.Seek(0, io.SeekEnd)
+		// Store the per-execution log beside the configured log file for locality.
+		failureLog, err = os.CreateTemp(filepath.Dir(logPath), filepath.Base(logPath)+".")
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "kurarun: cannot seek log file: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "kurarun: cannot create failure log: %v\n", err)
 			return 125
 		}
-		log = logFile
+		defer func() {
+			_ = failureLog.Close()
+			_ = os.Remove(failureLog.Name())
+		}()
+		// Keep this execution's records separate from the shared log file.
+		log = io.MultiWriter(logFile, failureLog)
 	}
 
 	writeTerminal := opts.LogPath == "" || opts.Tee
@@ -158,7 +163,7 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 		code := startErrorCode(err)
 		output.info(fmt.Sprintf("command could not start: %v", err), !opts.Quiet && writeTerminal)
 		output.info(exitLine(code, time.Since(start), ""), !opts.Quiet && writeTerminal)
-		printFailureLog(code, logFile, logStart, stdout)
+		printFailureLog(code, failureLog, stdout)
 		return code
 	}
 
@@ -181,15 +186,15 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 
 	code, signalName := exitCode(err)
 	output.info(exitLine(code, time.Since(start), signalName), !opts.Quiet && writeTerminal)
-	printFailureLog(code, logFile, logStart, stdout)
+	printFailureLog(code, failureLog, stdout)
 	return code
 }
 
-func printFailureLog(code int, logFile *os.File, logStart int64, stdout io.Writer) {
-	if code != 0 && logFile != nil {
+func printFailureLog(code int, failureLog *os.File, stdout io.Writer) {
+	if code != 0 && failureLog != nil {
 		// Print only this run's log records after a failure, so cron can notify with the details.
-		if _, err := logFile.Seek(logStart, io.SeekStart); err == nil {
-			_, _ = io.Copy(stdout, logFile)
+		if _, err := failureLog.Seek(0, io.SeekStart); err == nil {
+			_, _ = io.Copy(stdout, failureLog)
 		}
 	}
 }

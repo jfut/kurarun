@@ -43,6 +43,13 @@ func TestRunLogsAndPrintsFailureOutput(t *testing.T) {
 	if got := stderr.String(); got != "" {
 		t.Fatalf("failure stderr = %q, want empty", got)
 	}
+	leftovers, err := filepath.Glob(path + ".*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("temporary failure logs remain: %v", leftovers)
+	}
 }
 
 func TestRunDoesNotPrintSuccessfulLog(t *testing.T) {
@@ -82,6 +89,57 @@ func TestRunTruncatePrintsFailureOutput(t *testing.T) {
 	}
 	if got := stderr.String(); got != "" {
 		t.Fatalf("failure stderr = %q, want empty", got)
+	}
+}
+
+func TestRunFailureOutputExcludesConcurrentLogRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.log")
+	type result struct {
+		code   int
+		stdout string
+		stderr string
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		code := run(options{LogPath: path}, []string{"sh", "-c", "sleep 0.2; printf own; exit 7"}, &stdout, &stderr)
+		resultCh <- result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(data), "command start:") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("command start record was not written")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	concurrentLog, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := concurrentLog.WriteString("other execution\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := concurrentLog.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := <-resultCh
+	if got.code != 7 {
+		t.Fatalf("exit code = %d, want 7", got.code)
+	}
+	if !strings.Contains(got.stdout, "own") {
+		t.Fatalf("failure stdout does not include this execution: %q", got.stdout)
+	}
+	if strings.Contains(got.stdout, "other execution") {
+		t.Fatalf("failure stdout includes concurrent execution: %q", got.stdout)
+	}
+	if got.stderr != "" {
+		t.Fatalf("failure stderr = %q, want empty", got.stderr)
 	}
 }
 
