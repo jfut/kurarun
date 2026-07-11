@@ -5,6 +5,8 @@
 
 `kurarun` is a Linux CLI tool that runs a command and can record its output and exit status to a log file. It is intended for use with cron, systemd timers, CI/CD, and scheduled batch jobs.
 
+It can be used as a modern alternative to [cronlog](https://github.com/kazuho/kaztools/blob/master/cronlog) when you need timestamped command output and exit-status logging for scheduled jobs.
+
 ## Installation
 
 Download an RPM package from the [Releases](https://github.com/jfut/kurarun/releases) page, or configure the RPM repository below on RHEL-compatible distributions.
