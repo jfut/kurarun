@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,6 +31,7 @@ var (
 
 type options struct {
 	LogPath  string           `name:"log" short:"l" placeholder:"FILE" help:"Log file path. Use '-' to append .log to the command path."`
+	Name     string           `name:"name" short:"n" placeholder:"NAME" help:"Prefix log records with NAME. Use '-' for the command's full path."`
 	Format   string           `name:"output" short:"o" enum:"text,json" default:"text" help:"Output format (text or json)."`
 	Truncate bool             `short:"t" help:"Truncate the log before execution."`
 	Tee      bool             `help:"Also write log records to the terminal."`
@@ -129,12 +131,11 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 		// Commands without a log retain their direct terminal output behavior.
 		terminalStdout, terminalStderr = stdout, stderr
 	}
-	output := newLineLogger(log, terminalStdout, terminalStderr, opts.Format)
-	start := time.Now()
-	output.info(fmt.Sprintf("command start: %s", formatCommand(argv)), !opts.Quiet && writeTerminal)
-
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	output := newLineLogger(log, terminalStdout, terminalStderr, opts.Format, recordPrefix(opts.Name, cmd.Path))
+	start := time.Now()
+	output.info(fmt.Sprintf("command start: %s", formatCommand(argv)), !opts.Quiet && writeTerminal)
 	commandStdout := output.stdout()
 	commandStderr := output.stderr()
 	cmd.Stdout = commandStdout
@@ -263,14 +264,30 @@ func formatCommand(argv []string) string {
 	return strings.Join(quoted, " ")
 }
 
+func recordPrefix(name, commandPath string) string {
+	if name == "" {
+		return ""
+	}
+	if name == "-" {
+		// cmd.Path may be relative when the command was supplied with a relative path.
+		if absolutePath, err := filepath.Abs(commandPath); err == nil {
+			name = absolutePath
+		} else {
+			name = commandPath
+		}
+	}
+	return "[" + name + "] "
+}
+
 type lineLogger struct {
 	mu            sync.Mutex
 	log, out, err io.Writer
 	format        string
+	prefix        string
 }
 
-func newLineLogger(log, out, err io.Writer, format string) *lineLogger {
-	return &lineLogger{log: log, out: out, err: err, format: format}
+func newLineLogger(log, out, err io.Writer, format, prefix string) *lineLogger {
+	return &lineLogger{log: log, out: out, err: err, format: format, prefix: prefix}
 }
 
 func (l *lineLogger) stdout() *streamWriter {
@@ -292,6 +309,7 @@ func (l *lineLogger) info(message string, terminal bool) {
 }
 
 func (l *lineLogger) writeRecord(ts, message, stream string, terminal io.Writer) {
+	message = l.prefix + message
 	line := ts + " " + message + "\n"
 	if l.format == "json" {
 		record := map[string]string{"timestamp": ts, "message": message}

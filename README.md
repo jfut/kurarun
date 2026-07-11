@@ -67,11 +67,24 @@ Write the execution log and also display it in the terminal:
 kurarun -l job.log --tee -- /home/backup/bin/backup
 ```
 
+Prefix every log record with a job name:
+
+```bash
+kurarun -n backup -l job.log -- /home/backup/bin/backup
+```
+
+Use the command's full path as the prefix:
+
+```bash
+kurarun -n - -l job.log -- /home/backup/bin/backup
+```
+
 Everything after `--` is the command to execute and its arguments. A shell is not used implicitly. Specify `sh -c '...'` explicitly only when shell syntax is needed.
 
 ### Options
 
 - `-l`, `--log FILE`: Write execution logs to FILE. Use `-l -` to append `.log` to the command path (for example, `tmp/backup.sh.log`)
+- `-n`, `--name NAME`: Prefix every record with `[NAME]`. Use `-n -` to use the command's full path as the name
 - `-o`, `--output FORMAT`: Select the output format: `text` (default) or `json`
 - `-t`, `--truncate`: Empty the log before execution
 - `--tee`: Also write log records to the terminal
@@ -89,6 +102,14 @@ Without `--log`, timestamped child process output is displayed in the terminal a
 2026-07-11T00:42:06.639+09:00 command start: /usr/local/bin/backup.sh
 2026-07-11T00:42:07.112+09:00 backup started
 2026-07-11T00:43:20.220+09:00 command exited with code: 0, duration: 0000-00-00 00:01:14.108
+```
+
+With `-n backup`, each record has the name after its timestamp:
+
+```text
+2026-07-11T00:42:06.639+09:00 [backup] command start: /usr/local/bin/backup.sh
+2026-07-11T00:42:07.112+09:00 [backup] backup started
+2026-07-11T00:43:20.220+09:00 [backup] command exited with code: 0, duration: 0000-00-00 00:01:14.108
 ```
 
 With `-o json`, each record is written as one JSON object per line (JSONL):
