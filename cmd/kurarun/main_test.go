@@ -36,6 +36,42 @@ func TestRunLogsOutputAndExitCode(t *testing.T) {
 	}
 }
 
+func TestRunNamePrefixesEveryRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.log")
+	code := run(options{LogPath: path, Name: "nightly"}, []string{"sh", "-c", "printf hello; printf error >&2"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if !strings.Contains(line, " [nightly] ") {
+			t.Errorf("record does not have name prefix: %s", line)
+		}
+	}
+}
+
+func TestRunNameDashUsesCommandFullPath(t *testing.T) {
+	dir := t.TempDir()
+	commandPath := filepath.Join(dir, "command")
+	if err := os.WriteFile(commandPath, []byte("#!/bin/sh\nprintf hello\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "job.log")
+	if code := run(options{LogPath: path, Name: "-"}, []string{commandPath}, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), " ["+commandPath+"] ") {
+		t.Fatalf("log does not contain command full path prefix: %s", data)
+	}
+}
+
 func TestRunTeeWritesLogRecordsToTerminal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "job.log")
 	var stdout, stderr bytes.Buffer
@@ -227,8 +263,8 @@ func TestParseArgsPassesCommandFlagsThrough(t *testing.T) {
 }
 
 func TestParseArgsSupportsShortOptions(t *testing.T) {
-	opts, _, code := parseArgs([]string{"-t", "-q", "--tee", "--log", "job.log", "--", "echo"}, &bytes.Buffer{}, &bytes.Buffer{})
-	if code != 0 || !opts.Truncate || !opts.Quiet || !opts.Tee {
+	opts, _, code := parseArgs([]string{"-t", "-q", "--tee", "--log", "job.log", "-n", "nightly", "--", "echo"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 || !opts.Truncate || !opts.Quiet || !opts.Tee || opts.Name != "nightly" {
 		t.Fatalf("options = %+v, code = %d", opts, code)
 	}
 }
