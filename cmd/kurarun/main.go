@@ -107,21 +107,30 @@ func printHelp(options kong.HelpOptions, ctx *kong.Context) error {
 
 func run(opts options, argv []string, stdout, stderr io.Writer) int {
 	log := io.Writer(io.Discard)
+	var logFile *os.File
+	var logStart int64
 	logPath := opts.LogPath
 	if logPath == "-" {
 		logPath = argv[0] + ".log"
 	}
 	if logPath != "" {
-		flags := os.O_WRONLY | os.O_CREATE | os.O_APPEND
+		flags := os.O_RDWR | os.O_CREATE | os.O_APPEND
 		if opts.Truncate {
-			flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+			// Failure handling reads this execution's records back to stdout.
+			flags = os.O_RDWR | os.O_CREATE | os.O_TRUNC
 		}
-		logFile, err := os.OpenFile(logPath, flags, 0660)
+		var err error
+		logFile, err = os.OpenFile(logPath, flags, 0660)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "kurarun: cannot open log file: %v\n", err)
 			return 125
 		}
 		defer func() { _ = logFile.Close() }()
+		logStart, err = logFile.Seek(0, io.SeekEnd)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "kurarun: cannot seek log file: %v\n", err)
+			return 125
+		}
 		log = logFile
 	}
 
@@ -149,6 +158,7 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 		code := startErrorCode(err)
 		output.info(fmt.Sprintf("command could not start: %v", err), !opts.Quiet && writeTerminal)
 		output.info(exitLine(code, time.Since(start), ""), !opts.Quiet && writeTerminal)
+		printFailureLog(code, logFile, logStart, stdout)
 		return code
 	}
 
@@ -171,7 +181,17 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 
 	code, signalName := exitCode(err)
 	output.info(exitLine(code, time.Since(start), signalName), !opts.Quiet && writeTerminal)
+	printFailureLog(code, logFile, logStart, stdout)
 	return code
+}
+
+func printFailureLog(code int, logFile *os.File, logStart int64, stdout io.Writer) {
+	if code != 0 && logFile != nil {
+		// Print only this run's log records after a failure, so cron can notify with the details.
+		if _, err := logFile.Seek(logStart, io.SeekStart); err == nil {
+			_, _ = io.Copy(stdout, logFile)
+		}
+	}
 }
 
 func forwardSignals(signals <-chan os.Signal, done <-chan struct{}, forward func(syscall.Signal)) {
