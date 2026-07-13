@@ -37,34 +37,10 @@ Run a command without writing a log file:
 kurarun -- echo "run without a log file"
 ```
 
-Append the execution log to a file in the current directory:
-
-```bash
-kurarun -l job.log -- rsync -a /src/ /dst/
-```
-
-Write the execution log to an explicitly specified path:
+Write the execution log to an explicitly specified path. Use `-l -` to append `.log` to the command path (for example, `/home/backup/bin/backup.log`):
 
 ```bash
 kurarun -l /var/log/backup.log -- /home/backup/bin/backup
-```
-
-Derive the log path by appending `.log` to the command path (`/home/backup/bin/backup.log`):
-
-```bash
-kurarun -l - -- /home/backup/bin/backup
-```
-
-Write the execution log as JSONL:
-
-```bash
-kurarun --log job.json -o json -- /home/backup/bin/backup
-```
-
-Write the execution log as CSV:
-
-```bash
-kurarun --log job.csv -o csv -- /home/backup/bin/backup
 ```
 
 Write the execution log and also display it in the terminal:
@@ -73,25 +49,38 @@ Write the execution log and also display it in the terminal:
 kurarun -l job.log --tee -- /home/backup/bin/backup
 ```
 
-Prefix every log record with a job name:
+Prefix every log record with a job name. Use `-n -` to use the command's full path as the name:
 
 ```bash
 kurarun -n backup -l job.log -- /home/backup/bin/backup
 ```
 
-Use the command's full path as the prefix:
-
-```bash
-kurarun -n - -l job.log -- /home/backup/bin/backup
-```
-
-Disable the execution ID in log records:
-
-```bash
-kurarun --no-id -l job.log -- /home/backup/bin/backup
-```
-
 Everything after `--` is the command to execute and its arguments. A shell is not used implicitly. Specify `sh -c '...'` explicitly only when shell syntax is needed.
+
+### Crontab example
+
+A particularly effective use is to run scheduled jobs from `crontab` and receive an email only when a job fails. For example:
+
+```cron
+MAILTO=ops@example.com
+11 2 * * * /usr/bin/kurarun --log /var/log/backup.log -- /usr/local/bin/backup.sh
+```
+
+On a successful run, `/var/log/backup.log` contains records such as:
+
+```text
+2026-07-11T02:11:06.639+09:00 9bdbe34 command start: /usr/local/bin/backup.sh
+2026-07-11T02:11:07.112+09:00 9bdbe34 backup started
+2026-07-11T02:12:20.220+09:00 9bdbe34 command exited with code: 0, duration: 0000-00-00 00:01:14.108
+```
+
+If the command exits with a status other than `0`, `kurarun` writes that execution's complete log to standard output. cron sends this output to the address specified by `MAILTO`, so the failure log is delivered by email:
+
+```text
+2026-07-11T02:11:00.123+09:00 a1b2c3d command start: /usr/local/bin/backup.sh
+2026-07-11T02:11:01.456+09:00 a1b2c3d backup failed: database unavailable
+2026-07-11T02:11:01.457+09:00 a1b2c3d command exited with code: 1, duration: 0000-00-00 00:00:01.334
+```
 
 ### Options
 
@@ -114,24 +103,24 @@ Without `--log`, timestamped child process output is displayed in the terminal a
 If the command exits with a non-zero status, kurarun writes this execution's complete log records to standard output after the command finishes, so cron can send them by email. This output contains only the failed execution's records even when multiple kurarun processes append to the same log file concurrently.
 
 ```text
-2026-07-11T01:22:06.639+09:00 9bdbe34 command start: /usr/local/bin/backup.sh
-2026-07-11T01:22:07.112+09:00 9bdbe34 backup started
-2026-07-11T01:23:20.220+09:00 9bdbe34 command exited with code: 0, duration: 0000-00-00 00:01:14.108
+2026-07-11T02:11:06.639+09:00 9bdbe34 command start: /usr/local/bin/backup.sh
+2026-07-11T02:11:07.112+09:00 9bdbe34 backup started
+2026-07-11T02:12:20.220+09:00 9bdbe34 command exited with code: 0, duration: 0000-00-00 00:01:14.108
 ```
 
 With `-n backup`, each record has the name after its timestamp and execution ID:
 
 ```text
-2026-07-11T01:22:06.639+09:00 9bdbe34 [backup] command start: /usr/local/bin/backup.sh
-2026-07-11T01:22:07.112+09:00 9bdbe34 [backup] backup started
-2026-07-11T01:23:20.220+09:00 9bdbe34 [backup] command exited with code: 0, duration: 0000-00-00 00:01:14.108
+2026-07-11T02:11:06.639+09:00 9bdbe34 [backup] command start: /usr/local/bin/backup.sh
+2026-07-11T02:11:07.112+09:00 9bdbe34 [backup] backup started
+2026-07-11T02:12:20.220+09:00 9bdbe34 [backup] command exited with code: 0, duration: 0000-00-00 00:01:14.108
 ```
 
 With `-o json`, each record is written as one JSON object per line (JSONL):
 
 ```json
-{"timestamp":"2026-07-11T01:22:06.639+09:00","id":"9bdbe34","message":"command start: /usr/local/bin/backup.sh"}
-{"timestamp":"2026-07-11T01:22:07.112+09:00","id":"9bdbe34","message":"backup started","stream":"stdout"}
+{"timestamp":"2026-07-11T02:11:06.639+09:00","id":"9bdbe34","message":"command start: /usr/local/bin/backup.sh"}
+{"timestamp":"2026-07-11T02:11:07.112+09:00","id":"9bdbe34","message":"backup started","stream":"stdout"}
 ```
 
 When a child process emits non-UTF-8 bytes, the record uses `"encoding":"base64"` and stores the original bytes as Base64 in `message`. This preserves arbitrary command output without producing invalid JSON.
@@ -139,8 +128,8 @@ When a child process emits non-UTF-8 bytes, the record uses `"encoding":"base64"
 With `-o csv`, each record is written as one CSV row without a header. Columns are `timestamp`, `id`, `message`, `stream`, and `encoding`, in that order. The `id` column is empty with `--no-id`. The `stream` column is `stdout` or `stderr` for child output and empty for kurarun records. The `encoding` column is empty for UTF-8 records and `base64` when the message contains non-UTF-8 bytes.
 
 ```csv
-2026-07-11T01:22:06.639+09:00,9bdbe34,command start: /usr/local/bin/backup.sh,,
-2026-07-11T01:22:07.112+09:00,9bdbe34,backup started,stdout,
+2026-07-11T02:11:06.639+09:00,9bdbe34,command start: /usr/local/bin/backup.sh,,
+2026-07-11T02:11:07.112+09:00,9bdbe34,backup started,stdout,
 ```
 
 If the log file does not exist, it is created with mode `0660` (before applying the umask). Parent directories are not created. Command-line arguments may contain sensitive information, so take care with both log-file permissions and argument contents.
