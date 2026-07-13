@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,7 +33,7 @@ var (
 type options struct {
 	LogPath  string           `name:"log" short:"l" placeholder:"FILE" help:"Log file path. Use '-' to append .log to the command path."`
 	Name     string           `name:"name" short:"n" placeholder:"NAME" help:"Prefix log records with NAME. Use '-' for the command's full path."`
-	Format   string           `name:"output" short:"o" enum:"text,json" default:"text" help:"Output format (text or json)."`
+	Format   string           `name:"output" short:"o" enum:"text,json,csv" default:"text" help:"Output format (text, json, or csv)."`
 	Truncate bool             `short:"t" help:"Truncate the log before execution."`
 	Tee      bool             `help:"Also write log records to the terminal."`
 	Quiet    bool             `short:"q" help:"Do not write runner messages to the terminal."`
@@ -55,7 +56,7 @@ func parseArgs(args []string, stdout, stderr io.Writer) (options, []string, int)
 	var opts options
 	parser, err := kong.New(&opts,
 		kong.Name("kurarun"),
-		kong.Description("Execute one command and record its output in a text log."),
+		kong.Description("Execute one command and record its output in a log."),
 		kong.Vars{"version": fmt.Sprintf("kurarun %s (%s)", version, commit)},
 		kong.Writers(stdout, stderr),
 		kong.Help(printHelp),
@@ -336,11 +337,17 @@ func (l *lineLogger) info(message string, terminal bool) {
 func (l *lineLogger) writeRecord(ts, message, stream string, terminal io.Writer) {
 	message = l.prefix + message
 	line := ts + " " + message + "\n"
-	if l.format == "json" {
-		record := map[string]string{"timestamp": ts, "message": message}
-		if !utf8.ValidString(message) {
-			// JSON strings require UTF-8, so retain arbitrary command output losslessly.
-			record["message"] = base64.StdEncoding.EncodeToString([]byte(message))
+	encoding := ""
+	encodedMessage := message
+	if !utf8.ValidString(message) {
+		// JSON and CSV cannot safely represent arbitrary invalid UTF-8 text as-is.
+		encoding = "base64"
+		encodedMessage = base64.StdEncoding.EncodeToString([]byte(message))
+	}
+	switch l.format {
+	case "json":
+		record := map[string]string{"timestamp": ts, "message": encodedMessage}
+		if encoding != "" {
 			record["encoding"] = "base64"
 		}
 		if stream != "" {
@@ -349,6 +356,17 @@ func (l *lineLogger) writeRecord(ts, message, stream string, terminal io.Writer)
 		encoded, err := json.Marshal(record)
 		if err == nil {
 			line = string(encoded) + "\n"
+		}
+	case "csv":
+		// Keep a fixed column order so append-only logs remain easy to process:
+		// timestamp, message, stream, encoding. CSV quoting handles commas and quotes.
+		var encoded bytes.Buffer
+		writer := csv.NewWriter(&encoded)
+		if err := writer.Write([]string{ts, encodedMessage, stream, encoding}); err == nil {
+			writer.Flush()
+			if writer.Error() == nil {
+				line = encoded.String()
+			}
 		}
 	}
 	_, _ = io.WriteString(l.log, line)
