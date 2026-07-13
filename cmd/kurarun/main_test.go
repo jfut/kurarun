@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -306,6 +307,65 @@ func TestRunJSONEncodesNonUTF8OutputLosslessly(t *testing.T) {
 	t.Fatal("stdout record not found")
 }
 
+func TestRunCSVOutputUsesFixedColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.csv")
+	code := run(options{LogPath: path, Format: "csv"}, []string{"printf", "hello, \"world\""}, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := csv.NewReader(bytes.NewReader(data)).ReadAll()
+	if err != nil {
+		t.Fatalf("invalid CSV: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("CSV records = %d, want 3: %s", len(records), data)
+	}
+	for _, record := range records {
+		if len(record) != 4 {
+			t.Fatalf("CSV columns = %d, want 4: %v", len(record), record)
+		}
+		if _, err := time.Parse("2006-01-02T15:04:05.000Z07:00", record[0]); err != nil {
+			t.Fatalf("timestamp = %q: %v", record[0], err)
+		}
+	}
+	if records[1][1] != `hello, "world"` || records[1][2] != "stdout" || records[1][3] != "" {
+		t.Fatalf("stdout record = %v", records[1])
+	}
+}
+
+func TestRunCSVEncodesNonUTF8OutputLosslessly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.csv")
+	code := run(options{LogPath: path, Format: "csv"}, []string{"sh", "-c", "printf '\\377\\n'"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := csv.NewReader(bytes.NewReader(data)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if len(record) == 4 && record[2] == "stdout" {
+			if record[3] != "base64" {
+				t.Fatalf("encoding = %q, want base64", record[3])
+			}
+			decoded, err := base64.StdEncoding.DecodeString(record[1])
+			if err != nil || !bytes.Equal(decoded, []byte{0xff}) {
+				t.Fatalf("decoded output = %x, err = %v", decoded, err)
+			}
+			return
+		}
+	}
+	t.Fatal("stdout record not found")
+}
+
 func TestForwardSignalsForwardsEverySignal(t *testing.T) {
 	signals := make(chan os.Signal, 2)
 	done := make(chan struct{})
@@ -399,6 +459,13 @@ func TestParseArgsPassesCommandFlagsThrough(t *testing.T) {
 func TestParseArgsSupportsShortOptions(t *testing.T) {
 	opts, _, code := parseArgs([]string{"-t", "-q", "--tee", "--log", "job.log", "-n", "nightly", "--", "echo"}, &bytes.Buffer{}, &bytes.Buffer{})
 	if code != 0 || !opts.Truncate || !opts.Quiet || !opts.Tee || opts.Name != "nightly" {
+		t.Fatalf("options = %+v, code = %d", opts, code)
+	}
+}
+
+func TestParseArgsSupportsCSVOutput(t *testing.T) {
+	opts, _, code := parseArgs([]string{"-o", "csv", "--", "echo"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 || opts.Format != "csv" {
 		t.Fatalf("options = %+v, code = %d", opts, code)
 	}
 }

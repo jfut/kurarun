@@ -61,6 +61,12 @@ Write the execution log as JSONL:
 kurarun --log job.json -o json -- /home/backup/bin/backup
 ```
 
+Write the execution log as CSV:
+
+```bash
+kurarun --log job.csv -o csv -- /home/backup/bin/backup
+```
+
 Write the execution log and also display it in the terminal:
 
 ```bash
@@ -85,7 +91,7 @@ Everything after `--` is the command to execute and its arguments. A shell is no
 
 - `-l`, `--log FILE`: Write execution logs to FILE. Use `-l -` to append `.log` to the command path (for example, `tmp/backup.sh.log`)
 - `-n`, `--name NAME`: Prefix every record with `[NAME]`. Use `-n -` to use the command's full path as the name
-- `-o`, `--output FORMAT`: Select the output format: `text` (default) or `json`
+- `-o`, `--output FORMAT`: Select the output format: `text` (default), `json`, or `csv`
 - `-t`, `--truncate`: Empty the log before execution
 - `--tee`: Also write log records to the terminal
 - `-q`, `--quiet`: Do not display kurarun's start and exit lines in the terminal (they are still written to the log)
@@ -101,27 +107,34 @@ Without `--log`, timestamped child process output is displayed in the terminal a
 If the command exits with a non-zero status, kurarun writes this execution's complete log records to standard output after the command finishes, so cron can send them by email. This output contains only the failed execution's records even when multiple kurarun processes append to the same log file concurrently.
 
 ```text
-2026-07-11T00:42:06.639+09:00 command start: /usr/local/bin/backup.sh
-2026-07-11T00:42:07.112+09:00 backup started
-2026-07-11T00:43:20.220+09:00 command exited with code: 0, duration: 0000-00-00 00:01:14.108
+2026-07-11T01:22:06.639+09:00 command start: /usr/local/bin/backup.sh
+2026-07-11T01:22:07.112+09:00 backup started
+2026-07-11T01:23:20.220+09:00 command exited with code: 0, duration: 0000-00-00 00:01:14.108
 ```
 
 With `-n backup`, each record has the name after its timestamp:
 
 ```text
-2026-07-11T00:42:06.639+09:00 [backup] command start: /usr/local/bin/backup.sh
-2026-07-11T00:42:07.112+09:00 [backup] backup started
-2026-07-11T00:43:20.220+09:00 [backup] command exited with code: 0, duration: 0000-00-00 00:01:14.108
+2026-07-11T01:22:06.639+09:00 [backup] command start: /usr/local/bin/backup.sh
+2026-07-11T01:22:07.112+09:00 [backup] backup started
+2026-07-11T01:23:20.220+09:00 [backup] command exited with code: 0, duration: 0000-00-00 00:01:14.108
 ```
 
 With `-o json`, each record is written as one JSON object per line (JSONL):
 
 ```json
-{"timestamp":"2026-07-11T00:42:06.639+09:00","message":"command start: /usr/local/bin/backup.sh"}
-{"timestamp":"2026-07-11T00:42:07.112+09:00","message":"backup started","stream":"stdout"}
+{"timestamp":"2026-07-11T01:22:06.639+09:00","message":"command start: /usr/local/bin/backup.sh"}
+{"timestamp":"2026-07-11T01:22:07.112+09:00","message":"backup started","stream":"stdout"}
 ```
 
 When a child process emits non-UTF-8 bytes, the record uses `"encoding":"base64"` and stores the original bytes as Base64 in `message`. This preserves arbitrary command output without producing invalid JSON.
+
+With `-o csv`, each record is written as one CSV row without a header. Columns are `timestamp`, `message`, `stream`, and `encoding`, in that order. The `stream` column is `stdout` or `stderr` for child output and empty for kurarun records. The `encoding` column is empty for UTF-8 records and `base64` when the message contains non-UTF-8 bytes.
+
+```csv
+2026-07-11T01:22:06.639+09:00,command start: /usr/local/bin/backup.sh,,
+2026-07-11T01:22:07.112+09:00,backup started,stdout,
+```
 
 If the log file does not exist, it is created with mode `0660` (before applying the umask). Parent directories are not created. Command-line arguments may contain sensitive information, so take care with both log-file permissions and argument contents.
 
