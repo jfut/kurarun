@@ -37,23 +37,27 @@ Run a command without writing a log file:
 kurarun -- echo "run without a log file"
 ```
 
-Write the execution log to an explicitly specified path. Use `-l -` to append `.log` to the command path (for example, `/home/backup/bin/backup.log`):
+Write the execution log to an explicitly specified path:
 
 ```bash
-kurarun -l /var/log/backup.log -- /home/backup/bin/backup
+kurarun -l /home/backup/log/awesome-backup.log -- /home/backup/bin/awesome-backup
 ```
+
+If you use `-l -`, `.log` is appended to the command path (for example, `/home/backup/bin/awesome-backup.log`).
 
 Write the execution log and also display it in the terminal:
 
 ```bash
-kurarun -l job.log --tee -- /home/backup/bin/backup
+kurarun -l job.log --tee -- /home/backup/bin/awesome-backup
 ```
 
-Prefix every log record with a job name. Use `-n -` to use the command's full path as the name:
+Prefix every log record with a job name:
 
 ```bash
-kurarun -n backup -l job.log -- /home/backup/bin/backup
+kurarun -n backup -l job.log -- /home/backup/bin/awesome-backup
 ```
+
+If you use `-n -`, the command's full path is used as the name.
 
 Everything after `--` is the command to execute and its arguments. A shell is not used implicitly. Specify `sh -c '...'` explicitly only when shell syntax is needed.
 
@@ -63,13 +67,13 @@ A particularly effective use is to run scheduled jobs from `crontab` and receive
 
 ```cron
 MAILTO=ops@example.com
-11 2 * * * /usr/bin/kurarun --log /var/log/backup.log -- /usr/local/bin/backup.sh
+11 2 * * * /usr/bin/kurarun -l /home/backup/log/awesome-backup.log -- /home/backup/bin/awesome-backup
 ```
 
-On a successful run, `/var/log/backup.log` contains records such as:
+On a successful run, `/home/backup/log/awesome-backup.log` contains records such as:
 
 ```text
-2026-07-11T02:11:06.639+09:00 9bdbe34 command start: /usr/local/bin/backup.sh
+2026-07-11T02:11:06.639+09:00 9bdbe34 command start: /home/backup/bin/awesome-backup
 2026-07-11T02:11:07.112+09:00 9bdbe34 backup started
 2026-07-11T02:12:20.220+09:00 9bdbe34 command exited with code: 0, duration: 0000-00-00 00:01:14.108
 ```
@@ -77,7 +81,7 @@ On a successful run, `/var/log/backup.log` contains records such as:
 If the command exits with a status other than `0`, `kurarun` writes that execution's complete log to standard output. cron sends this output to the address specified by `MAILTO`, so the failure log is delivered by email:
 
 ```text
-2026-07-11T02:11:00.123+09:00 a1b2c3d command start: /usr/local/bin/backup.sh
+2026-07-11T02:11:00.123+09:00 a1b2c3d command start: /home/backup/bin/awesome-backup
 2026-07-11T02:11:01.456+09:00 a1b2c3d backup failed: database unavailable
 2026-07-11T02:11:01.457+09:00 a1b2c3d command exited with code: 1, duration: 0000-00-00 00:00:01.334
 ```
@@ -103,7 +107,7 @@ Without `--log`, timestamped child process output is displayed in the terminal a
 If the command exits with a non-zero status, kurarun writes this execution's complete log records to standard output after the command finishes, so cron can send them by email. This output contains only the failed execution's records even when multiple kurarun processes append to the same log file concurrently.
 
 ```text
-2026-07-11T02:11:06.639+09:00 9bdbe34 command start: /usr/local/bin/backup.sh
+2026-07-11T02:11:06.639+09:00 9bdbe34 command start: /home/backup/bin/awesome-backup
 2026-07-11T02:11:07.112+09:00 9bdbe34 backup started
 2026-07-11T02:12:20.220+09:00 9bdbe34 command exited with code: 0, duration: 0000-00-00 00:01:14.108
 ```
@@ -111,7 +115,7 @@ If the command exits with a non-zero status, kurarun writes this execution's com
 With `-n backup`, each record has the name after its timestamp and execution ID:
 
 ```text
-2026-07-11T02:11:06.639+09:00 9bdbe34 [backup] command start: /usr/local/bin/backup.sh
+2026-07-11T02:11:06.639+09:00 9bdbe34 [backup] command start: /home/backup/bin/awesome-backup
 2026-07-11T02:11:07.112+09:00 9bdbe34 [backup] backup started
 2026-07-11T02:12:20.220+09:00 9bdbe34 [backup] command exited with code: 0, duration: 0000-00-00 00:01:14.108
 ```
@@ -119,7 +123,7 @@ With `-n backup`, each record has the name after its timestamp and execution ID:
 With `-o json`, each record is written as one JSON object per line (JSONL):
 
 ```json
-{"timestamp":"2026-07-11T02:11:06.639+09:00","id":"9bdbe34","message":"command start: /usr/local/bin/backup.sh"}
+{"timestamp":"2026-07-11T02:11:06.639+09:00","id":"9bdbe34","message":"command start: /home/backup/bin/awesome-backup"}
 {"timestamp":"2026-07-11T02:11:07.112+09:00","id":"9bdbe34","message":"backup started","stream":"stdout"}
 ```
 
@@ -128,7 +132,7 @@ When a child process emits non-UTF-8 bytes, the record uses `"encoding":"base64"
 With `-o csv`, each record is written as one CSV row without a header. Columns are `timestamp`, `id`, `message`, `stream`, and `encoding`, in that order. The `id` column is empty with `--no-id`. The `stream` column is `stdout` or `stderr` for child output and empty for kurarun records. The `encoding` column is empty for UTF-8 records and `base64` when the message contains non-UTF-8 bytes.
 
 ```csv
-2026-07-11T02:11:06.639+09:00,9bdbe34,command start: /usr/local/bin/backup.sh,,
+2026-07-11T02:11:06.639+09:00,9bdbe34,command start: /home/backup/bin/awesome-backup,,
 2026-07-11T02:11:07.112+09:00,9bdbe34,backup started,stdout,
 ```
 
