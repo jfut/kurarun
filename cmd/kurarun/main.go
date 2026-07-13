@@ -367,19 +367,37 @@ type streamWriter struct {
 	terminal io.Writer
 	stream   string
 	pending  []byte
+	skipLF   bool
 }
 
 func (w *streamWriter) Write(p []byte) (int, error) {
 	w.logger.mu.Lock()
 	defer w.logger.mu.Unlock()
-	// Pipe writes are not line-oriented, so retain incomplete lines until their newline arrives.
+	// Pipe writes are not line-oriented, so retain incomplete records until their delimiter arrives.
 	w.pending = append(w.pending, p...)
 	for {
-		end := bytes.IndexByte(w.pending, '\n')
+		if w.skipLF {
+			if len(w.pending) == 0 {
+				break
+			}
+			if w.pending[0] == '\n' {
+				w.pending = w.pending[1:]
+			}
+			w.skipLF = false
+			continue
+		}
+		end := bytes.IndexAny(w.pending, "\r\n")
 		if end < 0 {
 			break
 		}
-		w.logger.writeRecord(timestamp(), string(w.pending[:end]), w.stream, w.terminal)
+		if end > 0 || w.pending[end] == '\n' {
+			// Treat CR as a record delimiter for progress meters that redraw with '\r'.
+			w.logger.writeRecord(timestamp(), string(w.pending[:end]), w.stream, w.terminal)
+		}
+		if w.pending[end] == '\r' {
+			// Ignore the LF in a CRLF pair, including when the pair crosses writes.
+			w.skipLF = true
+		}
 		w.pending = w.pending[end+1:]
 	}
 	return len(p), nil

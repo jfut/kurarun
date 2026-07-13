@@ -250,6 +250,33 @@ func TestRunKeepsPartialWritesInOneRecord(t *testing.T) {
 	}
 }
 
+func TestRunTimestampsCarriageReturnRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.log")
+	code := run(options{LogPath: path}, []string{"sh", "-c", "printf 'progress 0\\rprogress 100\\n'"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, want := range []string{"progress 0", "progress 100"} {
+		found := false
+		for _, line := range lines {
+			if strings.HasSuffix(line, " "+want) {
+				found = true
+				if _, err := time.Parse("2006-01-02T15:04:05.000Z07:00", strings.SplitN(line, " ", 2)[0]); err != nil {
+					t.Fatalf("record %q has no timestamp: %v", line, err)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("record %q not found in log: %s", want, data)
+		}
+	}
+}
+
 func TestRunJSONEncodesNonUTF8OutputLosslessly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "job.jsonl")
 	code := run(options{LogPath: path, Format: "json"}, []string{"sh", "-c", "printf '\\377\\n'"}, &bytes.Buffer{}, &bytes.Buffer{})
