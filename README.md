@@ -85,6 +85,12 @@ Use the command's full path as the prefix:
 kurarun -n - -l job.log -- /home/backup/bin/backup
 ```
 
+Disable the execution ID in log records:
+
+```bash
+kurarun --no-id -l job.log -- /home/backup/bin/backup
+```
+
 Everything after `--` is the command to execute and its arguments. A shell is not used implicitly. Specify `sh -c '...'` explicitly only when shell syntax is needed.
 
 ### Options
@@ -95,45 +101,46 @@ Everything after `--` is the command to execute and its arguments. A shell is no
 - `-t`, `--truncate`: Empty the log before execution
 - `--tee`: Also write log records to the terminal
 - `-q`, `--quiet`: Do not display kurarun's start and exit lines in the terminal (they are still written to the log)
+- `--no-id`: Do not include the execution ID in log records
 - `--version`: Display the version
 - `-h`, `--help`: Display usage information
 
 ## Log format
 
-Each line begins with an RFC 3339 timestamp with millisecond precision and a time zone. The start line, the child process's standard output and standard error, and the exit line are written to the same file in real time. Both newline (`\n`) and carriage return (`\r`) delimiters in child output start a new timestamped record, so progress meters that redraw a line are recorded correctly. The arrival order of standard output and standard error is preserved as much as possible.
+Each line begins with an RFC 3339 timestamp with millisecond precision and a time zone, followed by a 7-character hexadecimal execution ID. The same ID is used for every record from one execution, allowing records from concurrent executions to be grouped. The start line, the child process's standard output and standard error, and the exit line are written to the same file in real time. Both newline (`\n`) and carriage return (`\r`) delimiters in child output start a new timestamped record, so progress meters that redraw a line are recorded correctly. The arrival order of standard output and standard error is preserved as much as possible. Use `--no-id` to omit the execution ID.
 
 Without `--log`, timestamped child process output is displayed in the terminal and no log file is written. With `--log`, output is written only to the log file unless `--tee` is specified. `--truncate` requires `--log`.
 
 If the command exits with a non-zero status, kurarun writes this execution's complete log records to standard output after the command finishes, so cron can send them by email. This output contains only the failed execution's records even when multiple kurarun processes append to the same log file concurrently.
 
 ```text
-2026-07-11T01:22:06.639+09:00 command start: /usr/local/bin/backup.sh
-2026-07-11T01:22:07.112+09:00 backup started
-2026-07-11T01:23:20.220+09:00 command exited with code: 0, duration: 0000-00-00 00:01:14.108
+2026-07-11T01:22:06.639+09:00 9bdbe34 command start: /usr/local/bin/backup.sh
+2026-07-11T01:22:07.112+09:00 9bdbe34 backup started
+2026-07-11T01:23:20.220+09:00 9bdbe34 command exited with code: 0, duration: 0000-00-00 00:01:14.108
 ```
 
-With `-n backup`, each record has the name after its timestamp:
+With `-n backup`, each record has the name after its timestamp and execution ID:
 
 ```text
-2026-07-11T01:22:06.639+09:00 [backup] command start: /usr/local/bin/backup.sh
-2026-07-11T01:22:07.112+09:00 [backup] backup started
-2026-07-11T01:23:20.220+09:00 [backup] command exited with code: 0, duration: 0000-00-00 00:01:14.108
+2026-07-11T01:22:06.639+09:00 9bdbe34 [backup] command start: /usr/local/bin/backup.sh
+2026-07-11T01:22:07.112+09:00 9bdbe34 [backup] backup started
+2026-07-11T01:23:20.220+09:00 9bdbe34 [backup] command exited with code: 0, duration: 0000-00-00 00:01:14.108
 ```
 
 With `-o json`, each record is written as one JSON object per line (JSONL):
 
 ```json
-{"timestamp":"2026-07-11T01:22:06.639+09:00","message":"command start: /usr/local/bin/backup.sh"}
-{"timestamp":"2026-07-11T01:22:07.112+09:00","message":"backup started","stream":"stdout"}
+{"timestamp":"2026-07-11T01:22:06.639+09:00","id":"9bdbe34","message":"command start: /usr/local/bin/backup.sh"}
+{"timestamp":"2026-07-11T01:22:07.112+09:00","id":"9bdbe34","message":"backup started","stream":"stdout"}
 ```
 
 When a child process emits non-UTF-8 bytes, the record uses `"encoding":"base64"` and stores the original bytes as Base64 in `message`. This preserves arbitrary command output without producing invalid JSON.
 
-With `-o csv`, each record is written as one CSV row without a header. Columns are `timestamp`, `message`, `stream`, and `encoding`, in that order. The `stream` column is `stdout` or `stderr` for child output and empty for kurarun records. The `encoding` column is empty for UTF-8 records and `base64` when the message contains non-UTF-8 bytes.
+With `-o csv`, each record is written as one CSV row without a header. Columns are `timestamp`, `id`, `message`, `stream`, and `encoding`, in that order. The `id` column is empty with `--no-id`. The `stream` column is `stdout` or `stderr` for child output and empty for kurarun records. The `encoding` column is empty for UTF-8 records and `base64` when the message contains non-UTF-8 bytes.
 
 ```csv
-2026-07-11T01:22:06.639+09:00,command start: /usr/local/bin/backup.sh,,
-2026-07-11T01:22:07.112+09:00,backup started,stdout,
+2026-07-11T01:22:06.639+09:00,9bdbe34,command start: /usr/local/bin/backup.sh,,
+2026-07-11T01:22:07.112+09:00,9bdbe34,backup started,stdout,
 ```
 
 If the log file does not exist, it is created with mode `0660` (before applying the umask). Parent directories are not created. Command-line arguments may contain sensitive information, so take care with both log-file permissions and argument contents.

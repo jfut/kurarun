@@ -161,6 +161,61 @@ func TestRunNamePrefixesEveryRecord(t *testing.T) {
 	}
 }
 
+func TestRunPrefixesEveryRecordWithExecutionID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.log")
+	var stdout, stderr bytes.Buffer
+	code := run(options{LogPath: path}, []string{"sh", "-c", "printf hello"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("records = %d, want 3: %s", len(lines), data)
+	}
+	wantID := ""
+	for _, line := range lines {
+		fields := strings.SplitN(line, " ", 3)
+		if len(fields) != 3 {
+			t.Fatalf("record does not contain timestamp, ID, and message: %q", line)
+		}
+		id := fields[1]
+		if len(id) != 7 || strings.Trim(id, "0123456789abcdef") != "" {
+			t.Fatalf("execution ID = %q, want 7 lowercase hexadecimal characters", id)
+		}
+		if wantID == "" {
+			wantID = id
+		} else if id != wantID {
+			t.Fatalf("execution IDs differ: %q and %q", wantID, id)
+		}
+	}
+}
+
+func TestRunNoIDOmitsExecutionID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.log")
+	code := run(options{LogPath: path, NoID: true}, []string{"printf", "hello"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.SplitN(line, " ", 2)
+		if len(fields) != 2 {
+			t.Fatalf("record unexpectedly has no message: %q", line)
+		}
+		messageFields := strings.Fields(fields[1])
+		if len(messageFields) > 0 && len(messageFields[0]) == 7 && strings.Trim(messageFields[0], "0123456789abcdef") == "" {
+			t.Fatalf("record unexpectedly contains an execution ID: %q", line)
+		}
+	}
+}
+
 func TestRunNameDashUsesCommandFullPath(t *testing.T) {
 	dir := t.TempDir()
 	commandPath := filepath.Join(dir, "command")
@@ -229,6 +284,9 @@ func TestRunJSONOutputIsJSONL(t *testing.T) {
 		}
 		if record["timestamp"] == "" || record["message"] == "" {
 			t.Fatalf("incomplete record: %v", record)
+		}
+		if len(record["id"]) != 7 {
+			t.Fatalf("execution ID = %q, want 7 characters", record["id"])
 		}
 	}
 }
@@ -325,14 +383,17 @@ func TestRunCSVOutputUsesFixedColumns(t *testing.T) {
 		t.Fatalf("CSV records = %d, want 3: %s", len(records), data)
 	}
 	for _, record := range records {
-		if len(record) != 4 {
-			t.Fatalf("CSV columns = %d, want 4: %v", len(record), record)
+		if len(record) != 5 {
+			t.Fatalf("CSV columns = %d, want 5: %v", len(record), record)
 		}
 		if _, err := time.Parse("2006-01-02T15:04:05.000Z07:00", record[0]); err != nil {
 			t.Fatalf("timestamp = %q: %v", record[0], err)
 		}
+		if len(record[1]) != 7 {
+			t.Fatalf("execution ID = %q, want 7 characters", record[1])
+		}
 	}
-	if records[1][1] != `hello, "world"` || records[1][2] != "stdout" || records[1][3] != "" {
+	if records[1][2] != `hello, "world"` || records[1][3] != "stdout" || records[1][4] != "" {
 		t.Fatalf("stdout record = %v", records[1])
 	}
 }
@@ -352,11 +413,11 @@ func TestRunCSVEncodesNonUTF8OutputLosslessly(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, record := range records {
-		if len(record) == 4 && record[2] == "stdout" {
-			if record[3] != "base64" {
-				t.Fatalf("encoding = %q, want base64", record[3])
+		if len(record) == 5 && record[3] == "stdout" {
+			if record[4] != "base64" {
+				t.Fatalf("encoding = %q, want base64", record[4])
 			}
-			decoded, err := base64.StdEncoding.DecodeString(record[1])
+			decoded, err := base64.StdEncoding.DecodeString(record[2])
 			if err != nil || !bytes.Equal(decoded, []byte{0xff}) {
 				t.Fatalf("decoded output = %x, err = %v", decoded, err)
 			}
@@ -459,6 +520,13 @@ func TestParseArgsPassesCommandFlagsThrough(t *testing.T) {
 func TestParseArgsSupportsShortOptions(t *testing.T) {
 	opts, _, code := parseArgs([]string{"-t", "-q", "--tee", "--log", "job.log", "-n", "nightly", "--", "echo"}, &bytes.Buffer{}, &bytes.Buffer{})
 	if code != 0 || !opts.Truncate || !opts.Quiet || !opts.Tee || opts.Name != "nightly" {
+		t.Fatalf("options = %+v, code = %d", opts, code)
+	}
+}
+
+func TestParseArgsSupportsNoID(t *testing.T) {
+	opts, _, code := parseArgs([]string{"--no-id", "--", "echo"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if code != 0 || !opts.NoID {
 		t.Fatalf("options = %+v, code = %d", opts, code)
 	}
 }

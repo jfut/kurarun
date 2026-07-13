@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
@@ -37,6 +38,7 @@ type options struct {
 	Truncate bool             `short:"t" help:"Truncate the log before execution."`
 	Tee      bool             `help:"Also write log records to the terminal."`
 	Quiet    bool             `short:"q" help:"Do not write runner messages to the terminal."`
+	NoID     bool             `name:"no-id" help:"Do not include the execution ID in log records."`
 	Version  kong.VersionFlag `help:"Print version information and quit."`
 	Command  []string         `arg:"" optional:"" passthrough:"" placeholder:"command" help:"Command and arguments to execute."`
 }
@@ -107,6 +109,15 @@ func printHelp(options kong.HelpOptions, ctx *kong.Context) error {
 }
 
 func run(opts options, argv []string, stdout, stderr io.Writer) int {
+	executionID := ""
+	if !opts.NoID {
+		var err error
+		executionID, err = newExecutionID()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "kurarun: cannot generate execution ID: %v\n", err)
+			return 125
+		}
+	}
 	log := io.Writer(io.Discard)
 	var logFile *os.File
 	var failureLog *os.File
@@ -148,7 +159,7 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	output := newLineLogger(log, terminalStdout, terminalStderr, opts.Format, recordPrefix(opts.Name, cmd.Path))
+	output := newLineLogger(log, terminalStdout, terminalStderr, opts.Format, executionID, recordPrefix(opts.Name, cmd.Path))
 	start := time.Now()
 	output.info(fmt.Sprintf("command start: %s", formatCommand(argv)), !opts.Quiet && writeTerminal)
 	commandStdout := output.stdout()
@@ -305,15 +316,25 @@ func recordPrefix(name, commandPath string) string {
 	return "[" + name + "] "
 }
 
+func newExecutionID() (string, error) {
+	// Generate a short random ID so records from concurrent executions can be grouped.
+	var randomBytes [4]byte
+	if _, err := rand.Read(randomBytes[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", randomBytes[:])[:7], nil
+}
+
 type lineLogger struct {
 	mu            sync.Mutex
 	log, out, err io.Writer
 	format        string
+	executionID   string
 	prefix        string
 }
 
-func newLineLogger(log, out, err io.Writer, format, prefix string) *lineLogger {
-	return &lineLogger{log: log, out: out, err: err, format: format, prefix: prefix}
+func newLineLogger(log, out, err io.Writer, format, executionID, prefix string) *lineLogger {
+	return &lineLogger{log: log, out: out, err: err, format: format, executionID: executionID, prefix: prefix}
 }
 
 func (l *lineLogger) stdout() *streamWriter {
@@ -336,7 +357,7 @@ func (l *lineLogger) info(message string, terminal bool) {
 
 func (l *lineLogger) writeRecord(ts, message, stream string, terminal io.Writer) {
 	message = l.prefix + message
-	line := ts + " " + message + "\n"
+	line := ts + " " + l.textIDPrefix() + message + "\n"
 	encoding := ""
 	encodedMessage := message
 	if !utf8.ValidString(message) {
@@ -347,6 +368,9 @@ func (l *lineLogger) writeRecord(ts, message, stream string, terminal io.Writer)
 	switch l.format {
 	case "json":
 		record := map[string]string{"timestamp": ts, "message": encodedMessage}
+		if l.executionID != "" {
+			record["id"] = l.executionID
+		}
 		if encoding != "" {
 			record["encoding"] = "base64"
 		}
@@ -359,10 +383,10 @@ func (l *lineLogger) writeRecord(ts, message, stream string, terminal io.Writer)
 		}
 	case "csv":
 		// Keep a fixed column order so append-only logs remain easy to process:
-		// timestamp, message, stream, encoding. CSV quoting handles commas and quotes.
+		// timestamp, id, message, stream, encoding. CSV quoting handles commas and quotes.
 		var encoded bytes.Buffer
 		writer := csv.NewWriter(&encoded)
-		if err := writer.Write([]string{ts, encodedMessage, stream, encoding}); err == nil {
+		if err := writer.Write([]string{ts, l.executionID, encodedMessage, stream, encoding}); err == nil {
 			writer.Flush()
 			if writer.Error() == nil {
 				line = encoded.String()
@@ -373,6 +397,13 @@ func (l *lineLogger) writeRecord(ts, message, stream string, terminal io.Writer)
 	if terminal != nil {
 		_, _ = io.WriteString(terminal, line)
 	}
+}
+
+func (l *lineLogger) textIDPrefix() string {
+	if l.executionID == "" {
+		return ""
+	}
+	return l.executionID + " "
 }
 
 func timestamp() string {
