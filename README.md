@@ -94,7 +94,7 @@ Everything after `--` is the command to execute and its arguments. A shell is no
 
 ## Log format
 
-Each line begins with an RFC 3339 timestamp with millisecond precision and a time zone. The start line, the child process's standard output and standard error, and the exit line are written to the same file in real time. The arrival order of standard output and standard error is preserved as much as possible.
+Each line begins with an RFC 3339 timestamp with millisecond precision and a time zone. The start line, the child process's standard output and standard error, and the exit line are written to the same file in real time. Both newline (`\n`) and carriage return (`\r`) delimiters in child output start a new timestamped record, so progress meters that redraw a line are recorded correctly. The arrival order of standard output and standard error is preserved as much as possible.
 
 Without `--log`, timestamped child process output is displayed in the terminal and no log file is written. With `--log`, output is written only to the log file unless `--tee` is specified. `--truncate` requires `--log`.
 
