@@ -37,6 +37,8 @@ Run a command without writing a log file:
 kurarun -- echo "run without a log file"
 ```
 
+On success, no output is written to the terminal. If the command fails, its complete timestamped log is written to standard output, including when no log file is specified.
+
 Write the execution log to an explicitly specified path:
 
 ```bash
@@ -92,8 +94,8 @@ If the command exits with a status other than `0`, `kurarun` writes that executi
 - `-n`, `--name NAME`: Prefix every record with `[NAME]`. Use `-n -` to use the command's full path as the name
 - `-o`, `--output FORMAT`: Select the output format: `text` (default), `json`, or `csv`
 - `-t`, `--truncate`: Empty the log before execution
-- `--tee`: Also write log records to the terminal
-- `-q`, `--quiet`: Do not display kurarun's start and exit lines in the terminal (they are still written to the log)
+- `--tee`: Also display log records in the terminal while the command runs
+- `-q`, `--quiet`: Do not display kurarun's start and exit lines live in the terminal (they remain in the log and failure report)
 - `--no-id`: Do not include the execution ID in log records
 - `--version`: Display the version
 - `-h`, `--help`: Display usage information
@@ -102,7 +104,7 @@ If the command exits with a status other than `0`, `kurarun` writes that executi
 
 Each line begins with an RFC 3339 timestamp with millisecond precision and a time zone, followed by a 7-character hexadecimal execution ID. The same ID is used for every record from one execution, allowing records from concurrent executions to be grouped. The start line, the child process's standard output and standard error, and the exit line are written to the same file in real time. Both newline (`\n`) and carriage return (`\r`) delimiters in child output start a new timestamped record, so progress meters that redraw a line are recorded correctly. The arrival order of standard output and standard error is preserved as much as possible. Use `--no-id` to omit the execution ID.
 
-Without `--log`, timestamped child process output is displayed in the terminal and no log file is written. With `--log`, output is written only to the log file unless `--tee` is specified. `--truncate` requires `--log`.
+Without `--log`, timestamped output is kept in a temporary file and no persistent log file is written. With `--log`, output is written only to the log file unless `--tee` is specified. `--tee` displays records in the terminal while the command runs. `--truncate` requires `--log`.
 
 If the command exits with a non-zero status, kurarun writes this execution's complete log records to standard output after the command finishes, so cron can send them by email. This output contains only the failed execution's records even when multiple kurarun processes append to the same log file concurrently.
 

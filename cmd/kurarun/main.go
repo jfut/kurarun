@@ -36,8 +36,8 @@ type options struct {
 	Name     string           `name:"name" short:"n" placeholder:"NAME" help:"Prefix log records with NAME. Use '-' for the command's full path."`
 	Format   string           `name:"output" short:"o" enum:"text,json,csv" default:"text" help:"Output format (text, json, or csv)."`
 	Truncate bool             `short:"t" help:"Truncate the log before execution."`
-	Tee      bool             `help:"Also write log records to the terminal."`
-	Quiet    bool             `short:"q" help:"Do not write runner messages to the terminal."`
+	Tee      bool             `help:"Also display log records in the terminal while the command runs."`
+	Quiet    bool             `short:"q" help:"Do not display runner messages live in the terminal."`
 	NoID     bool             `name:"no-id" help:"Do not include the execution ID in log records."`
 	Version  kong.VersionFlag `help:"Print version information and quit."`
 	Command  []string         `arg:"" optional:"" passthrough:"" placeholder:"command" help:"Command and arguments to execute."`
@@ -137,24 +137,34 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 			return 125
 		}
 		defer func() { _ = logFile.Close() }()
-		// Store the per-execution log beside the configured log file for locality.
-		failureLog, err = os.CreateTemp(filepath.Dir(logPath), filepath.Base(logPath)+".")
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "kurarun: cannot create failure log: %v\n", err)
-			return 125
-		}
-		defer func() {
-			_ = failureLog.Close()
-			_ = os.Remove(failureLog.Name())
-		}()
+	}
+
+	// Keep a private copy for failure reporting even when no persistent log was requested.
+	failureLogDir, failureLogPattern := "", "kurarun-"
+	if logPath != "" {
+		failureLogDir, failureLogPattern = filepath.Dir(logPath), filepath.Base(logPath)+"."
+	}
+	var err error
+	failureLog, err = os.CreateTemp(failureLogDir, failureLogPattern)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "kurarun: cannot create failure log: %v\n", err)
+		return 125
+	}
+	defer func() {
+		_ = failureLog.Close()
+		_ = os.Remove(failureLog.Name())
+	}()
+	if logFile == nil {
+		log = failureLog
+	} else {
 		// Keep this execution's records separate from the shared log file.
 		log = io.MultiWriter(logFile, failureLog)
 	}
 
-	writeTerminal := opts.LogPath == "" || opts.Tee
+	writeTerminal := opts.Tee
 	terminalStdout, terminalStderr := io.Writer(io.Discard), io.Writer(io.Discard)
 	if writeTerminal {
-		// Commands without a log retain their direct terminal output behavior.
+		// --tee explicitly opts into seeing records while the command is running.
 		terminalStdout, terminalStderr = stdout, stderr
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -189,7 +199,7 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 			_ = syscall.Kill(-cmd.Process.Pid, sig)
 		})
 	}()
-	err := cmd.Wait()
+	err = cmd.Wait()
 	signal.Stop(signals)
 	close(done)
 	signalWG.Wait()

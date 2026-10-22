@@ -247,23 +247,33 @@ func TestRunTeeWritesLogRecordsToTerminal(t *testing.T) {
 	}
 }
 
-func TestRunWithoutLogWritesOutputToTerminal(t *testing.T) {
+func TestRunWithoutLogSuppressesSuccessfulOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run(options{}, []string{"sh", "-c", "printf hello; printf error >&2"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	if !strings.Contains(stdout.String(), "hello") {
-		t.Fatalf("stdout = %q, want command output", stdout.String())
+	if got := stdout.String(); got != "" {
+		t.Fatalf("success stdout = %q, want empty", got)
 	}
-	if !strings.Contains(stderr.String(), "error") {
-		t.Fatalf("stderr = %q, want command output", stderr.String())
+	if got := stderr.String(); got != "" {
+		t.Fatalf("success stderr = %q, want empty", got)
 	}
-	if !strings.Contains(stdout.String(), "T") || !strings.Contains(stdout.String(), " hello\n") {
-		t.Fatalf("stdout = %q, want timestamped command output", stdout.String())
+}
+
+func TestRunWithoutLogPrintsFailureOutput(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run(options{}, []string{"sh", "-c", "printf hello; printf error >&2; exit 7"}, &stdout, &stderr)
+	if code != 7 {
+		t.Fatalf("exit code = %d, want 7", code)
 	}
-	if !strings.Contains(stderr.String(), "T") || !strings.Contains(stderr.String(), " error\n") {
-		t.Fatalf("stderr = %q, want timestamped command output", stderr.String())
+	for _, want := range []string{"command start: sh -c", "hello", "error", "command exited with code: 7"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("failure stdout does not contain %q: %q", want, stdout.String())
+		}
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("failure stderr = %q, want empty", got)
 	}
 }
 
