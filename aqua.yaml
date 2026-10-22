@@ -8,14 +8,14 @@ checksum:
 registries:
 # https://github.com/aquaproj/aqua-registry
 - type: standard
-  ref: v4.534.0 # renovate: depName=aquaproj/aqua-registry
+  ref: v4.575.0 # renovate: depName=aquaproj/aqua-registry
   supported_envs:
     - linux
 # aqua update-checksum --prune
 packages:
-- name: casey/just@1.56.0
+- name: casey/just@1.59.0
 # go
-- name: golang/go@go1.26.5
-- name: golangci/golangci-lint@v2.12.2
-- name: goreleaser/goreleaser@v2.17.0
-- name: upx/upx@v5.2.0
+- name: golang/go@go1.27.3
+- name: golangci/golangci-lint@v2.15.0
+- name: goreleaser/goreleaser@v2.18.3
+- name: upx/upx@v5.2.1
