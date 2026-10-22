@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,6 +92,41 @@ func TestRunTruncatePrintsFailureOutput(t *testing.T) {
 	}
 	if got := stderr.String(); got != "" {
 		t.Fatalf("failure stderr = %q, want empty", got)
+	}
+}
+
+func TestRunRefusesSymlinkLogTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(target, []byte("keep this file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "job.log")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "command-ran")
+	var stdout, stderr bytes.Buffer
+	code := run(options{LogPath: link, Truncate: true}, []string{"sh", "-c", "touch \"$1\"", "sh", marker}, &stdout, &stderr)
+	if code != 125 {
+		t.Fatalf("exit code = %d, want 125", code)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "keep this file" {
+		t.Fatalf("symlink target = %q, err = %v; want original contents", got, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("command marker exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+func TestRunRefusesSpecialLogTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.pipe")
+	if err := syscall.Mkfifo(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(options{LogPath: path}, []string{"true"}, &stdout, &stderr); code != 125 {
+		t.Fatalf("exit code = %d, want 125", code)
 	}
 }
 
@@ -316,6 +353,65 @@ func TestRunKeepsPartialWritesInOneRecord(t *testing.T) {
 	}
 	if strings.Contains(string(data), " hello\n") {
 		t.Fatalf("partial output was recorded separately: %s", data)
+	}
+}
+
+func TestStreamWriterSplitsLongRecordsAtLimit(t *testing.T) {
+	var log bytes.Buffer
+	logger := newLineLogger(&log, io.Discard, io.Discard, "text", "", "")
+	stream := logger.stdout()
+	payload := bytes.Repeat([]byte("x"), 2*maxRecordBytes+17)
+	if n, err := stream.Write(payload); err != nil || n != len(payload) {
+		t.Fatalf("Write() = %d, %v; want %d bytes and no error", n, err, len(payload))
+	}
+	stream.flush()
+	lines := strings.Split(strings.TrimSuffix(log.String(), "\n"), "\n")
+	wantSizes := []int{maxRecordBytes, maxRecordBytes, 17}
+	if len(lines) != len(wantSizes) {
+		t.Fatalf("records = %d, want %d", len(lines), len(wantSizes))
+	}
+	var reconstructed strings.Builder
+	for i, line := range lines {
+		message := strings.SplitN(line, " ", 2)[1]
+		if len(message) != wantSizes[i] {
+			t.Fatalf("record %d has %d bytes, want %d", i, len(message), wantSizes[i])
+		}
+		reconstructed.WriteString(message)
+	}
+	if reconstructed.String() != string(payload) {
+		t.Fatal("reconstructed output differs from the input")
+	}
+}
+
+type failingTestWriter struct{}
+
+func (failingTestWriter) Write([]byte) (int, error) {
+	return 0, errors.New("simulated write failure")
+}
+
+func TestFanoutWriterPreservesHealthyLogSink(t *testing.T) {
+	var failureLog bytes.Buffer
+	writer := &fanoutWriter{
+		sinks:  []io.Writer{failingTestWriter{}, &failureLog},
+		failed: make([]bool, 2),
+	}
+	logger := newLineLogger(writer, io.Discard, io.Discard, "text", "", "")
+	logger.info("record survives", false)
+	logErr, _ := logger.writeErrors()
+	if logErr == nil {
+		t.Fatal("log write error was not reported")
+	}
+	if !strings.Contains(failureLog.String(), "record survives") {
+		t.Fatalf("healthy sink missed the record: %q", failureLog.String())
+	}
+}
+
+func TestStartErrorCodeDistinguishesMissingAndUnusableCommands(t *testing.T) {
+	if got := startErrorCode(&os.PathError{Err: syscall.ENOENT}); got != 127 {
+		t.Fatalf("missing command exit code = %d, want 127", got)
+	}
+	if got := startErrorCode(&os.PathError{Err: syscall.ENOEXEC}); got != 126 {
+		t.Fatalf("unusable command exit code = %d, want 126", got)
 	}
 }
 
@@ -559,6 +655,20 @@ func TestFormatCommandQuotesUnsafeArguments(t *testing.T) {
 	got := formatCommand([]string{"echo", "path with spaces", "plain"})
 	if got != "echo \"path with spaces\" plain" {
 		t.Fatalf("unexpected command: %s", got)
+	}
+}
+
+func TestFormatCommandEscapesControlCharacters(t *testing.T) {
+	got := formatCommand([]string{"tool", "before\x1b[2Jafter"})
+	if got != `tool "before\x1b[2Jafter"` {
+		t.Fatalf("command = %q, want terminal control characters escaped", got)
+	}
+}
+
+func TestRecordPrefixEscapesControlCharacters(t *testing.T) {
+	got := recordPrefix("nightly\nforged", "command")
+	if got != `["nightly\nforged"] ` {
+		t.Fatalf("prefix = %q, want control characters escaped", got)
 	}
 }
 

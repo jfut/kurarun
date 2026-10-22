@@ -20,6 +20,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/alecthomas/kong"
@@ -118,7 +119,7 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 			return 125
 		}
 	}
-	log := io.Writer(io.Discard)
+	var log io.Writer
 	var logFile *os.File
 	var failureLog *os.File
 	logPath := opts.LogPath
@@ -126,17 +127,17 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 		logPath = argv[0] + ".log"
 	}
 	if logPath != "" {
-		flags := os.O_WRONLY | os.O_CREATE | os.O_APPEND
-		if opts.Truncate {
-			flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-		}
 		var err error
-		logFile, err = os.OpenFile(logPath, flags, 0660)
+		logFile, err = openLogFile(logPath, opts.Truncate)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "kurarun: cannot open log file: %v\n", err)
 			return 125
 		}
-		defer func() { _ = logFile.Close() }()
+		defer func() {
+			if logFile != nil {
+				_ = logFile.Close()
+			}
+		}()
 	}
 
 	// Keep a private copy for failure reporting even when no persistent log was requested.
@@ -158,7 +159,7 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 		log = failureLog
 	} else {
 		// Keep this execution's records separate from the shared log file.
-		log = io.MultiWriter(logFile, failureLog)
+		log = &fanoutWriter{sinks: []io.Writer{logFile, failureLog}, failed: make([]bool, 2)}
 	}
 
 	writeTerminal := opts.Tee
@@ -172,6 +173,11 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 	output := newLineLogger(log, terminalStdout, terminalStderr, opts.Format, executionID, recordPrefix(opts.Name, cmd.Path))
 	start := time.Now()
 	output.info(fmt.Sprintf("command start: %s", formatCommand(argv)), !opts.Quiet && writeTerminal)
+	if logErr, _ := output.writeErrors(); logErr != nil {
+		_, _ = fmt.Fprintf(stderr, "kurarun: cannot write execution log: %v\n", logErr)
+		printFailureLog(125, failureLog, stdout)
+		return 125
+	}
 	commandStdout := output.stdout()
 	commandStderr := output.stderr()
 	cmd.Stdout = commandStdout
@@ -185,6 +191,20 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 		code := startErrorCode(err)
 		output.info(fmt.Sprintf("command could not start: %v", err), !opts.Quiet && writeTerminal)
 		output.info(exitLine(code, time.Since(start), ""), !opts.Quiet && writeTerminal)
+		closeErr := error(nil)
+		if logFile != nil {
+			closeErr = logFile.Close()
+			logFile = nil
+		}
+		logErr, terminalErr := output.writeErrors()
+		if logErr == nil {
+			logErr = closeErr
+		}
+		if logErr != nil {
+			_, _ = fmt.Fprintf(stderr, "kurarun: cannot write execution log: %v\n", logErr)
+		} else if terminalErr != nil {
+			_, _ = fmt.Fprintf(stderr, "kurarun: cannot write tee output: %v\n", terminalErr)
+		}
 		printFailureLog(code, failureLog, stdout)
 		return code
 	}
@@ -208,8 +228,54 @@ func run(opts options, argv []string, stdout, stderr io.Writer) int {
 
 	code, signalName := exitCode(err)
 	output.info(exitLine(code, time.Since(start), signalName), !opts.Quiet && writeTerminal)
+	closeErr := error(nil)
+	if logFile != nil {
+		closeErr = logFile.Close()
+		logFile = nil
+	}
+	logErr, terminalErr := output.writeErrors()
+	if logErr == nil {
+		logErr = closeErr
+	}
+	if logErr != nil {
+		_, _ = fmt.Fprintf(stderr, "kurarun: cannot write execution log: %v\n", logErr)
+		if code == 0 {
+			code = 125
+		}
+	}
+	if terminalErr != nil {
+		_, _ = fmt.Fprintf(stderr, "kurarun: cannot write tee output: %v\n", terminalErr)
+	}
 	printFailureLog(code, failureLog, stdout)
 	return code
+}
+
+func openLogFile(path string, truncate bool) (*os.File, error) {
+	// Open without following symlinks or blocking on special files before checking the target.
+	flags := syscall.O_WRONLY | os.O_CREATE | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+	if !truncate {
+		flags |= syscall.O_APPEND
+	}
+	file, err := os.OpenFile(path, flags, 0660)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, fmt.Errorf("log path is not a regular file")
+	}
+	if truncate {
+		if err := file.Truncate(0); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+	}
+	return file, nil
 }
 
 func printFailureLog(code int, failureLog *os.File, stdout io.Writer) {
@@ -238,14 +304,11 @@ func forwardSignals(signals <-chan os.Signal, done <-chan struct{}, forward func
 }
 
 func startErrorCode(err error) int {
-	if errors.Is(err, exec.ErrNotFound) {
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 		return 127
 	}
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) && errors.Is(pathErr.Err, syscall.EACCES) {
-		return 126
-	}
-	return 127
+	// A command that was found but cannot be executed follows the shell's 126 convention.
+	return 126
 }
 
 func exitCode(err error) (int, string) {
@@ -254,13 +317,16 @@ func exitCode(err error) (int, string) {
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		status := exitErr.Sys().(syscall.WaitStatus)
+		status, ok := exitErr.Sys().(syscall.WaitStatus)
+		if !ok {
+			return 125, ""
+		}
 		if status.Signaled() {
 			return 128 + int(status.Signal()), signalLabel(status.Signal())
 		}
 		return status.ExitStatus(), ""
 	}
-	return 127, ""
+	return 125, ""
 }
 
 func signalLabel(sig syscall.Signal) string {
@@ -302,7 +368,7 @@ func formatDuration(d time.Duration) string {
 func formatCommand(argv []string) string {
 	quoted := make([]string, len(argv))
 	for i, arg := range argv {
-		if arg == "" || strings.ContainsAny(arg, " \t\n'\"\\$&;|<>*?()[]{}!") {
+		if arg == "" || strings.ContainsAny(arg, " \t\n'\"\\$&;|<>*?()[]{}!") || containsNonPrintable(arg) {
 			quoted[i] = fmt.Sprintf("%q", arg)
 		} else {
 			quoted[i] = arg
@@ -323,11 +389,27 @@ func recordPrefix(name, commandPath string) string {
 			name = commandPath
 		}
 	}
+	if containsNonPrintable(name) {
+		name = fmt.Sprintf("%q", name)
+	}
 	return "[" + name + "] "
 }
 
+func containsNonPrintable(value string) bool {
+	// Escape metadata controls so command and name text cannot create fake log records.
+	if !utf8.ValidString(value) {
+		return true
+	}
+	for _, char := range value {
+		if !unicode.IsPrint(char) {
+			return true
+		}
+	}
+	return false
+}
+
 func newExecutionID() (string, error) {
-	// Generate a short random ID so records from concurrent executions can be grouped.
+	// Keep a short random ID so records from concurrent executions can be grouped.
 	var randomBytes [4]byte
 	if _, err := rand.Read(randomBytes[:]); err != nil {
 		return "", err
@@ -335,12 +417,17 @@ func newExecutionID() (string, error) {
 	return fmt.Sprintf("%x", randomBytes[:])[:7], nil
 }
 
+// Bound per-stream buffering when a child emits output without line delimiters.
+const maxRecordBytes = 64 * 1024
+
 type lineLogger struct {
 	mu            sync.Mutex
 	log, out, err io.Writer
 	format        string
 	executionID   string
 	prefix        string
+	logErr        error
+	terminalErr   error
 }
 
 func newLineLogger(log, out, err io.Writer, format, executionID, prefix string) *lineLogger {
@@ -367,46 +454,118 @@ func (l *lineLogger) info(message string, terminal bool) {
 
 func (l *lineLogger) writeRecord(ts, message, stream string, terminal io.Writer) {
 	message = l.prefix + message
-	line := ts + " " + l.textIDPrefix() + message + "\n"
-	encoding := ""
-	encodedMessage := message
-	if !utf8.ValidString(message) {
-		// JSON and CSV cannot safely represent arbitrary invalid UTF-8 text as-is.
-		encoding = "base64"
-		encodedMessage = base64.StdEncoding.EncodeToString([]byte(message))
-	}
+	var line []byte
 	switch l.format {
 	case "json":
-		record := map[string]string{"timestamp": ts, "message": encodedMessage}
-		if l.executionID != "" {
-			record["id"] = l.executionID
+		encoding, encodedMessage := encodeMessage(message)
+		encoded, err := json.Marshal(jsonLogRecord{
+			Timestamp: ts,
+			ID:        l.executionID,
+			Message:   encodedMessage,
+			Stream:    stream,
+			Encoding:  encoding,
+		})
+		if err != nil {
+			if l.logErr == nil {
+				l.logErr = err
+			}
+			return
 		}
-		if encoding != "" {
-			record["encoding"] = "base64"
-		}
-		if stream != "" {
-			record["stream"] = stream
-		}
-		encoded, err := json.Marshal(record)
-		if err == nil {
-			line = string(encoded) + "\n"
-		}
+		line = append(encoded, '\n')
 	case "csv":
 		// Keep a fixed column order so append-only logs remain easy to process:
 		// timestamp, id, message, stream, encoding. CSV quoting handles commas and quotes.
+		encoding, encodedMessage := encodeMessage(message)
 		var encoded bytes.Buffer
 		writer := csv.NewWriter(&encoded)
-		if err := writer.Write([]string{ts, l.executionID, encodedMessage, stream, encoding}); err == nil {
-			writer.Flush()
-			if writer.Error() == nil {
-				line = encoded.String()
+		if err := writer.Write([]string{ts, l.executionID, encodedMessage, stream, encoding}); err != nil {
+			if l.logErr == nil {
+				l.logErr = err
+			}
+			return
+		}
+		writer.Flush()
+		if err := writer.Error(); err != nil {
+			if l.logErr == nil {
+				l.logErr = err
+			}
+			return
+		}
+		line = encoded.Bytes()
+	default:
+		line = make([]byte, 0, len(ts)+len(message)+len(l.executionID)+3)
+		line = append(line, ts...)
+		line = append(line, ' ')
+		line = append(line, l.textIDPrefix()...)
+		line = append(line, message...)
+		line = append(line, '\n')
+	}
+	if n, err := l.log.Write(line); l.logErr == nil {
+		if err == nil && n != len(line) {
+			err = io.ErrShortWrite
+		}
+		l.logErr = err
+	}
+	if terminal != nil {
+		if n, err := terminal.Write(line); l.terminalErr == nil {
+			if err == nil && n != len(line) {
+				err = io.ErrShortWrite
+			}
+			l.terminalErr = err
+		}
+	}
+}
+
+type jsonLogRecord struct {
+	Timestamp string `json:"timestamp"`
+	ID        string `json:"id,omitempty"`
+	Message   string `json:"message"`
+	Stream    string `json:"stream,omitempty"`
+	Encoding  string `json:"encoding,omitempty"`
+}
+
+func encodeMessage(message string) (string, string) {
+	if !utf8.ValidString(message) {
+		// JSON and CSV cannot safely represent arbitrary invalid UTF-8 text as-is.
+		return "base64", base64.StdEncoding.EncodeToString([]byte(message))
+	}
+	return "", message
+}
+
+func (l *lineLogger) writeErrors() (error, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.logErr, l.terminalErr
+}
+
+// fanoutWriter writes each execution record to independent persistent and failure-log sinks.
+type fanoutWriter struct {
+	sinks  []io.Writer
+	failed []bool
+	err    error
+}
+
+func (w *fanoutWriter) Write(p []byte) (int, error) {
+	for i, sink := range w.sinks {
+		if w.failed[i] {
+			continue
+		}
+		n, err := sink.Write(p)
+		if err == nil && n != len(p) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			w.failed[i] = true
+			if w.err == nil {
+				w.err = err
 			}
 		}
 	}
-	_, _ = io.WriteString(l.log, line)
-	if terminal != nil {
-		_, _ = io.WriteString(terminal, line)
+	if w.err != nil {
+		// Continue reporting full writes so a failed sink does not stop the other sinks.
+		return len(p), w.err
 	}
+	return len(p), nil
 }
 
 func (l *lineLogger) textIDPrefix() string {
@@ -432,34 +591,48 @@ type streamWriter struct {
 func (w *streamWriter) Write(p []byte) (int, error) {
 	w.logger.mu.Lock()
 	defer w.logger.mu.Unlock()
-	// Pipe writes are not line-oriented, so retain incomplete records until their delimiter arrives.
-	w.pending = append(w.pending, p...)
+	written := len(p)
 	for {
 		if w.skipLF {
-			if len(w.pending) == 0 {
-				break
+			if len(p) == 0 {
+				return written, nil
 			}
-			if w.pending[0] == '\n' {
-				w.pending = w.pending[1:]
+			if len(p) > 0 && p[0] == '\n' {
+				p = p[1:]
 			}
 			w.skipLF = false
-			continue
 		}
-		end := bytes.IndexAny(w.pending, "\r\n")
+		end := bytes.IndexAny(p, "\r\n")
 		if end < 0 {
-			break
+			w.appendRecordData(p)
+			return written, nil
 		}
-		if end > 0 || w.pending[end] == '\n' {
+		w.appendRecordData(p[:end])
+		delimiter := p[end]
+		if len(w.pending) > 0 || delimiter == '\n' {
 			// Treat CR as a record delimiter for progress meters that redraw with '\r'.
-			w.logger.writeRecord(timestamp(), string(w.pending[:end]), w.stream, w.terminal)
+			w.logger.writeRecord(timestamp(), string(w.pending), w.stream, w.terminal)
+			w.pending = w.pending[:0]
 		}
-		if w.pending[end] == '\r' {
+		if delimiter == '\r' {
 			// Ignore the LF in a CRLF pair, including when the pair crosses writes.
 			w.skipLF = true
 		}
-		w.pending = w.pending[end+1:]
+		p = p[end+1:]
 	}
-	return len(p), nil
+}
+
+func (w *streamWriter) appendRecordData(data []byte) {
+	for len(data) > 0 {
+		room := maxRecordBytes - len(w.pending)
+		take := min(room, len(data))
+		w.pending = append(w.pending, data[:take]...)
+		data = data[take:]
+		if len(w.pending) == maxRecordBytes {
+			w.logger.writeRecord(timestamp(), string(w.pending), w.stream, w.terminal)
+			w.pending = w.pending[:0]
+		}
+	}
 }
 
 func (w *streamWriter) flush() {
